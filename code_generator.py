@@ -106,48 +106,60 @@ class CodeGenerator:
         checks: List[Dict],
         task_id: str
     ) -> str:
-        """
-        Generate HTML solution using GPT-5 Nano with improved prompting
-        """
+        """Generate HTML solution using GPT-5 Nano with VERY explicit instructions"""
         
-        # Build comprehensive prompt
         prompt = self._build_generation_prompt(brief, attachments, checks, task_id)
         
         logger.info("Sending request to GPT-5 Nano...")
         
         try:
-            # Try with optimized prompt for GPT-5 Nano
+            # Note: AI Pipe/OpenAI client variants may not accept 'max_completion_tokens'
+            # Use a conservative call signature compatible with API wrappers
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {
                         "role": "user",
-                        "content": f"""Create a complete HTML file for this task. Return ONLY the HTML code, nothing else.
+                        "content": f"""Create a COMPLETE, WORKING HTML page. Return ONLY HTML code, nothing else.
 
-{prompt}
+TASK: {brief}
 
-Generate the complete HTML now:"""
+REQUIREMENTS:
+1. Single HTML file with embedded CSS and JavaScript
+2. Use Bootstrap 5 CDN: https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css
+3. ALL JavaScript in <script> tags before </body>
+4. Wrap code in: document.addEventListener('DOMContentLoaded', function() {{ ... }})
+
+DATA HANDLING:
+{self._build_data_instructions(attachments, brief)}
+
+ELEMENT IDs REQUIRED:
+{self._build_element_instructions(checks, brief)}
+
+FUNCTIONALITY:
+{self._build_functionality_instructions(brief)}
+
+CHECKS THAT MUST PASS:
+{chr(10).join(f"- {check.get('js', str(check))}" for check in checks if check)}
+
+Return complete HTML starting with <!DOCTYPE html>. Make it FUNCTIONAL and INTERACTIVE."""
                     }
-                ],
-                max_tokens=3000  # ✅ Fixed: Use max_tokens instead of max_completion_tokens
+                ]
             )
             
             html_code = response.choices[0].message.content
             
-            if not html_code or not html_code.strip():
-                logger.warning("GPT-5 Nano returned empty content")
+            if not html_code or not html_code.strip() or len(html_code) < 200:
+                logger.warning(f"GPT-5 Nano returned insufficient content (length: {len(html_code) if html_code else 0})")
                 return ""
             
             html_code = html_code.strip()
-            
-            # Clean up response
             html_code = self._clean_html_response(html_code)
             
-            # Ensure it starts with DOCTYPE
             if not html_code.startswith('<!DOCTYPE') and not html_code.startswith('<!doctype'):
                 html_code = '<!DOCTYPE html>\n' + html_code
             
-            logger.info(f"Generated {len(html_code)} characters of HTML")
+            logger.info(f"✅ GPT-5 Nano generated {len(html_code)} characters of HTML")
             
             return html_code
             
@@ -447,6 +459,87 @@ Generate the complete HTML now:"""
         
         return html
     
+    def _build_data_instructions(self, attachments: Dict[str, str], brief: str) -> str:
+        """Build specific data handling instructions"""
+        instructions = []
+        
+        if attachments:
+            for name, content in attachments.items():
+                if '.csv' in name.lower():
+                    instructions.append(f"""
+CSV Data ({name}):
+{content[:300]}...
+- Parse by splitting lines and commas
+- First line is headers
+- Extract sales/amount column
+- Sum all values using parseFloat()
+- Display in the specified element""")
+                    
+                elif '.md' in name.lower():
+                    instructions.append(f"""
+Markdown Data ({name}):
+- Use marked.parse() to convert
+- Display in #markdown-output
+- Use highlight.js for code blocks""")
+                    
+                elif '.json' in name.lower():
+                    instructions.append(f"""
+JSON Data ({name}):
+- Parse with JSON.parse()
+- Extract rates/currency data
+- Apply conversions""")
+        else:
+            instructions.append("- No attachments provided")
+        
+        return '\n'.join(instructions) if instructions else "No data attachments"
+    
+    def _build_element_instructions(self, checks: List[Dict], brief: str) -> str:
+        """Extract required element IDs from checks and brief"""
+        import re
+        
+        elements = set()
+        
+        # From checks
+        for check in checks:
+            js_code = check.get('js', '')
+            # Extract IDs like #element-id or getElementById('element-id')
+            ids = re.findall(r'[#]([a-z0-9-]+)|getElementById\(["\']([a-z0-9-]+)', js_code, re.IGNORECASE)
+            for match in ids:
+                element_id = match[0] or match[1]
+                if element_id:
+                    elements.add(element_id)
+        
+        # From brief
+        brief_ids = re.findall(r'#([a-z0-9-]+)', brief, re.IGNORECASE)
+        elements.update(brief_ids)
+        
+        if elements:
+            return '\n'.join(f"- #{eid}" for eid in sorted(elements))
+        return "Check the brief for required elements"
+    
+    def _build_functionality_instructions(self, brief: str) -> str:
+        """Build specific functionality instructions based on brief"""
+        funcs = []
+        
+        brief_lower = brief.lower()
+        
+        if 'button' in brief_lower:
+            funcs.append("- Add click event listeners to all buttons")
+        if 'form' in brief_lower:
+            funcs.append("- Add submit event listener with preventDefault()")
+        if 'filter' in brief_lower or 'select' in brief_lower:
+            funcs.append("- Add change event listener to filters/selects")
+        if 'sum' in brief_lower or 'total' in brief_lower or 'calculate' in brief_lower:
+            funcs.append("- Calculate sums by iterating data and using parseFloat()")
+        if 'table' in brief_lower:
+            funcs.append("- Populate table rows dynamically with data")
+        if 'api' in brief_lower or 'fetch' in brief_lower:
+            funcs.append("- Use fetch() with proper error handling")
+        if 'localstorage' in brief_lower or 'cache' in brief_lower:
+            funcs.append("- Use localStorage.setItem() and getItem()")
+        
+        return '\n'.join(funcs) if funcs else "Make all interactive elements work"
+
     def _parse_requirements(self, brief: str) -> Dict[str, Any]:
         """Parse brief to extract requirements"""
         return {
@@ -462,110 +555,182 @@ Generate the complete HTML now:"""
         }
     
     def _build_csv_task(self, req: Dict, attachments: Dict, brief: str, seed: str) -> tuple:
-        """Build HTML and JS for CSV sum tasks"""
+        """Build FULLY FUNCTIONAL HTML and JS for CSV sum tasks"""
         
         csv_data = next((v for k, v in attachments.items() if '.csv' in k.lower()), '')
-        element_id = req['element_ids'][0] if req['element_ids'] else 'total-sales'
         
-        # Build title with seed
-        title_match = re.search(r'title.*["\']([^"\']+)["\']', brief, re.IGNORECASE)
+        # Find element IDs from requirements
+        element_ids = req['element_ids']
+        total_sales_id = next((eid for eid in element_ids if 'total' in eid or 'sales' in eid), 'total-sales')
+        product_table_id = next((eid for eid in element_ids if 'product' in eid or 'table' in eid), 'product-sales')
+        region_filter_id = next((eid for eid in element_ids if 'region' in eid or 'filter' in eid), 'region-filter')
+        
+        # Extract title from brief or use default
+        import re
+        title_match = re.search(r'title.*?["\']([^"\']+)["\']', brief, re.IGNORECASE)
         if title_match:
             title = title_match.group(1).replace('${seed}', seed)
         else:
             title = f"Sales Summary {seed}"
         
+        # Check if this is Round 2 (needs table and filter)
+        needs_table = 'table' in brief.lower() or product_table_id in element_ids
+        needs_filter = 'filter' in brief.lower() or 'region' in brief.lower()
+        
         body = f"""<div class="container">
     <h1>{title}</h1>
+    
     <div class="result">
-        Total Sales: $<span id="{element_id}">0.00</span>
+        Total Sales: $<span id="{total_sales_id}">0.00</span>
     </div>
-    <table id="product-sales" class="table">
+    
+    {f'''
+    <div class="mb-3">
+        <label for="{region_filter_id}" class="form-label">Filter by Region:</label>
+        <select id="{region_filter_id}" class="form-select">
+            <option value="all">All Regions</option>
+        </select>
+    </div>
+    ''' if needs_filter else ''}
+    
+    {f'''
+    <table id="{product_table_id}" class="table table-striped">
         <thead>
             <tr>
                 <th>Product</th>
-                <th>Sales Amount</th>
+                <th>Sales</th>
+                {f'<th>Region</th>' if needs_filter else ''}
             </tr>
         </thead>
         <tbody>
-            <!-- Data will be populated by JavaScript -->
+            <!-- Data populated by JavaScript -->
         </tbody>
     </table>
+    ''' if needs_table else ''}
+    
+    <div class="mt-3">
+        <small class="text-muted">Data loaded from CSV attachment</small>
+    </div>
 </div>"""
         
-        # Escape backticks in CSV data
-        csv_data_escaped = csv_data.replace('`', '\\`').replace('$', '\\$')
+        # Escape the CSV data properly
+        csv_data_escaped = csv_data.replace('`', '\\`').replace('$', '\\$').replace('\\', '\\\\')
         
         js = f"""
-// Embedded CSV data
+// Embedded CSV Data
 const csvData = `{csv_data_escaped}`;
 
+let allProducts = [];
+let currentRegion = 'all';
+
+// Parse CSV function
+function parseCSV(csvText) {{
+    const lines = csvText.trim().split('\\n');
+    if (lines.length === 0) return [];
+    
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    const products = [];
+    
+    for (let i = 1; i < lines.length; i++) {{
+        const line = lines[i].trim();
+        if (!line) continue;
+        
+        const values = line.split(',').map(v => v.trim());
+        const product = {{}};
+        
+        headers.forEach((header, index) => {{
+            product[header] = values[index] || '';
+        }});
+        
+        products.push(product);
+    }}
+    
+    return products;
+}}
+
+// Calculate total sales
+function calculateTotal(products) {{
+    return products.reduce((sum, product) => {{
+        const sales = parseFloat(product.sales || product.amount || product.price || 0);
+        return sum + sales;
+    }}, 0);
+}}
+
+// Update display
+function updateDisplay() {{
+    let filteredProducts = allProducts;
+    
+    // Apply region filter if exists
+    if (currentRegion !== 'all') {{
+        filteredProducts = allProducts.filter(p => 
+            (p.region || '').toLowerCase() === currentRegion.toLowerCase()
+        );
+    }}
+    
+    // Calculate and display total
+    const total = calculateTotal(filteredProducts);
+    const totalElement = document.getElementById('{total_sales_id}');
+    if (totalElement) {{
+        totalElement.textContent = total.toFixed(2);
+        {f'totalElement.setAttribute("data-region", currentRegion);' if needs_filter else ''}
+    }}
+    
+    // Update table if exists
+    const tableBody = document.querySelector('#{product_table_id} tbody');
+    if (tableBody) {{
+        tableBody.innerHTML = '';
+        filteredProducts.forEach(product => {{
+            const row = tableBody.insertRow();
+            row.insertCell(0).textContent = product.product || product.name || 'Unknown';
+            row.insertCell(1).textContent = '$' + parseFloat(product.sales || product.amount || 0).toFixed(2);
+            {f"row.insertCell(2).textContent = product.region || 'N/A';" if needs_filter else ''}
+        }});
+    }}
+}}
+
+// Initialize
 document.addEventListener('DOMContentLoaded', function() {{
     try {{
-        // Set document title
+        console.log('Initializing CSV Sales App...');
+        
+        // Set page title
         document.title = "{title}";
         
-        // Parse CSV
-        const lines = csvData.trim().split('\\n');
-        if (lines.length === 0) {{
-            console.error('No CSV data found');
-            return;
-        }}
+        // Parse CSV data
+        allProducts = parseCSV(csvData);
+        console.log('Parsed products:', allProducts.length);
         
-        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-        console.log('CSV Headers:', headers);
-        
-        // Find sales column
-        const salesIndex = headers.findIndex(h => 
-            h.includes('sales') || h.includes('amount') || h.includes('revenue')
-        );
-        
-        if (salesIndex === -1) {{
-            console.error('Sales column not found in CSV');
-            document.querySelector('#{element_id}').textContent = 'Error: No sales column';
-            return;
-        }}
-        
-        let total = 0;
-        const products = [];
-        
-        // Process each row
-        for (let i = 1; i < lines.length; i++) {{
-            const line = lines[i].trim();
-            if (!line) continue;
+        // Populate region filter if exists
+        const regionFilter = document.getElementById('{region_filter_id}');
+        if (regionFilter && allProducts.length > 0) {{
+            const regions = [...new Set(allProducts.map(p => p.region).filter(r => r))];
+            regions.forEach(region => {{
+                const option = document.createElement('option');
+                option.value = region;
+                option.textContent = region;
+                regionFilter.appendChild(option);
+            }});
             
-            const values = line.split(',').map(v => v.trim());
-            if (values.length <= salesIndex) continue;
-            
-            const salesValue = parseFloat(values[salesIndex]) || 0;
-            total += salesValue;
-            
-            products.push({{
-                product: values[0] || 'Unknown',
-                sales: salesValue
+            // Add change listener
+            regionFilter.addEventListener('change', function() {{
+                currentRegion = this.value;
+                console.log('Region filter changed to:', currentRegion);
+                updateDisplay();
             }});
         }}
         
-        console.log('Total calculated:', total);
-        console.log('Products:', products);
+        // Initial display
+        updateDisplay();
         
-        // Display total
-        const totalElement = document.querySelector('#{element_id}');
-        if (totalElement) {{
-            totalElement.textContent = total.toFixed(2);
-        }}
+        console.log('✅ App initialized successfully');
         
-        // Populate table
-        const tableBody = document.querySelector('#product-sales tbody');
-        if (tableBody && products.length > 0) {{
-            products.forEach(p => {{
-                const row = tableBody.insertRow();
-                row.insertCell(0).textContent = p.product;
-                row.insertCell(1).textContent = '$' + p.sales.toFixed(2);
-            }});
-        }}
     }} catch (error) {{
-        console.error('Error processing CSV:', error);
-        document.querySelector('#{element_id}').textContent = 'Error';
+        console.error('❌ Error initializing app:', error);
+        const totalElement = document.getElementById('{total_sales_id}');
+        if (totalElement) {{
+            totalElement.textContent = 'Error';
+            totalElement.style.color = 'red';
+        }}
     }}
 }});
 """
@@ -645,9 +810,9 @@ document.addEventListener('DOMContentLoaded', function() {{
     
     def _build_github_task(self, req: Dict, brief: str, seed: str) -> tuple:
         """Build HTML and JS for GitHub API tasks"""
-        
-        form_id = next((eid for eid in req['element_ids'] if 'github-user' in eid.lower()), f'github-user-{seed}')
-        
+        # choose or synthesize a stable form id
+        form_id = next((eid for eid in req.get('element_ids', []) if 'github-user' in eid.lower()), f'github-user-{seed}')
+
         body = f"""<div class="container">
     <h1>GitHub User Information</h1>
     <form id="{form_id}">
@@ -676,15 +841,16 @@ document.addEventListener('DOMContentLoaded', function() {{
         Currency: USD
     </div>
 </div>"""
-        
-        js = f"""
-document.addEventListener('DOMContentLoaded', function() {{
-    const form = document.getElementById('{form_id}');
+
+        # Build JS as a plain string with placeholders, then replace them to avoid Python f-string conflicts with JS template literals
+        js = """
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('__FORM_ID__');
     const statusEl = document.getElementById('github-status');
     const resultsDiv = document.getElementById('results');
     
     // Load cached username from localStorage
-    const cacheKey = '{form_id}-cache';
+    const cacheKey = '__CACHE_KEY__';
     try {{
         const cached = localStorage.getItem(cacheKey);
         if (cached) {{
@@ -718,13 +884,13 @@ document.addEventListener('DOMContentLoaded', function() {{
                 'Accept': 'application/vnd.github.v3+json'
             }};
             
-            if (token) {{
-                headers['Authorization'] = `token ${{token}}`;
-            }}
-            
-            const response = await fetch(`https://api.github.com/users/${{username}}`, {{
+            if (token) {
+                headers['Authorization'] = `token ${token}`;
+            }
+
+            const response = await fetch(`https://api.github.com/users/${username}`, {
                 headers: headers
-            }});
+            });
             
             if (!response.ok) {{
                 throw new Error(`GitHub API returned ${{response.status}}: ${{response.statusText}}`);
@@ -743,30 +909,33 @@ document.addEventListener('DOMContentLoaded', function() {{
             
             // Update UI
             document.getElementById('github-created-at').textContent = createdAtStr;
-            document.getElementById('github-account-age').textContent = `${{ageYears}} years`;
+            document.getElementById('github-account-age').textContent = `${ageYears} years`;
             
             // Show results
             resultsDiv.style.display = 'block';
             statusEl.className = 'alert alert-success';
-            statusEl.textContent = `Successfully fetched data for @${{username}}!`;
+            statusEl.textContent = `Successfully fetched data for @${username}!`;
             
             // Cache the username
-            try {{
-                localStorage.setItem(cacheKey, JSON.stringify({{ username: username }}));
-            }} catch (e) {{
+            try {
+                localStorage.setItem(cacheKey, JSON.stringify({ username: username }));
+            } catch (e) {
                 console.warn('Could not save to localStorage');
-            }}
+            }
             
         }} catch (error) {{
             console.error('Error fetching GitHub data:', error);
             statusEl.className = 'alert alert-danger';
-            statusEl.textContent = `Error: ${{error.message}}`;
+            statusEl.textContent = `Error: ${error.message}`;
             resultsDiv.style.display = 'none';
         }}
     }});
-}});
 """
-        
+
+        # Replace placeholders
+        js = js.replace('__FORM_ID__', form_id).replace('__CACHE_KEY__', f"{form_id}-cache")
+
+        return body, js
         return body, js
     
     def _build_generic_task(self, req: Dict, brief: str, task_id: str) -> tuple:
@@ -794,5 +963,5 @@ document.addEventListener('DOMContentLoaded', function() {
     console.log('Task is ready for evaluation');
 });
 """
-        
+
         return body, js

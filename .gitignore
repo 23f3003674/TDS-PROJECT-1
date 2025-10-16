@@ -60,4 +60,8 @@ models/
 # Temporary
 *.tmp
 temp/
-tmp/
+tmp/.env.example
+
+# Local test helpers (do not commit secrets)
+run_tests.ps1
+run_test_request.py

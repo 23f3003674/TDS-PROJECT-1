@@ -63,6 +63,13 @@ class GitHubManager:
                 else:
                     error_msg = response.text
                     logger.error(f"Failed to create repository: {error_msg}")
+                    # Detect name already exists
+                    if response.status_code == 422 and 'name already exists' in error_msg.lower():
+                        return {
+                            'success': False,
+                            'error': f"GitHub API error: {response.status_code} - {error_msg}",
+                            'name_exists': True
+                        }
                     return {
                         'success': False,
                         'error': f"GitHub API error: {response.status_code} - {error_msg}"
