@@ -1,0 +1,15 @@
+.git
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+.env
+.env.*
+run_tests.ps1
+run_test_request.py
+eval_receiver.py
+*.log
+.idea/
+.vscode/
