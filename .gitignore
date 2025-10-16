@@ -65,3 +65,17 @@ tmp/.env.example
 # Local test helpers (do not commit secrets)
 run_tests.ps1
 run_test_request.py
+
+# Ignore local envs and virtual environments
+.env
+.env.*.local
+venv/
+.venv/
+ENV/
+env/
+
+# Build artifacts
+dist/
+build/
+.pytest_cache/
+__pycache__/
