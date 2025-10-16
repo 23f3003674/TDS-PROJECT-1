@@ -1,3 +1,41 @@
+---
+title: TDS Project 1
+emoji: "🚀"
+colorFrom: blue
+colorTo: green
+sdk: docker
+sdk_version: "1.0"
+app_file: app.py
+pinned: false
+---
+
+# TDS-PROJECT-1
+
+This repository contains the FastAPI-based TDS project and a Dockerfile used to deploy the app as a Hugging Face Space (Docker runtime).
+
+Quick notes for Hugging Face Spaces
+- This is a Docker Space (see `sdk: docker` above) — HF will use the `Dockerfile` in the repository root to build the image.
+- Required secrets (add in the Space Settings → Secrets):
+  - AIMLAPI_KEY — LLM provider key used at runtime
+  - Any other environment variables referenced by `.env` (do not commit them)
+
+How to run locally (optional)
+
+1. Build the image locally:
+
+```bash
+docker build -t tds-project-1:local .
+```
+
+2. Run the container (expose port used by your app; check `app.py` for the port):
+
+```bash
+docker run -p 7860:7860 --env-file .env -it tds-project-1:local
+```
+
+If you push changes to GitHub and you have the GitHub Actions workflow configured to mirror to the Space, the Space will rebuild automatically.
+
+See also: https://huggingface.co/docs/hub/spaces-config-reference
 # TDS LLM Code Deployment
 
 This repository runs a FastAPI service that receives coding tasks, generates an HTML solution (via an LLM or fallback), creates/updates a GitHub repo, and enables GitHub Pages.
