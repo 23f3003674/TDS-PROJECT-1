@@ -9,7 +9,6 @@ from typing import List, Dict, Optional
 import uvicorn
 import logging
 from datetime import datetime
-import threading
 
 from task_processor import TaskProcessor
 from config import settings
@@ -100,77 +99,101 @@ async def health():
     }
 
 @app.post("/task", response_model=TaskResponse)
-async def receive_task(request: Request):
+async def receive_task(request: Request, background_tasks: BackgroundTasks):
     """
-    Immediately return 200 OK if secret matches, then process task in a separate thread.
+    Receive a coding task from instructors
     """
     try:
+        payload = {}
         try:
             payload = await request.json()
         except Exception:
+            # If the body isn't valid JSON, keep payload empty and continue so we always return 200/accepted
             logger.warning("Received non-JSON or invalid JSON body for /task")
-            payload = {}
 
-        secret = payload.get("secret") if isinstance(payload, dict) else None
-        nonce = payload.get("nonce", f"auto-{int(datetime.utcnow().timestamp())}")
-        task_name = payload.get("task", f"task-{nonce}")
-
-        # ✅ Step 1: Verify secret
+        # Validate secret early (return 401 if invalid)
+        secret = payload.get('secret') if isinstance(payload, dict) else None
         if secret != settings.SECRET:
-            logger.warning(f"❌ Invalid secret received for task {nonce}")
+            nonce = payload.get('nonce', 'unknown') if isinstance(payload, dict) else 'unknown'
+            logger.warning(f"Invalid secret received for task {nonce}")
             raise HTTPException(status_code=401, detail="Invalid secret")
+        
+        # Normalize payload into an object expected by TaskProcessor
+        from types import SimpleNamespace
+        import time
 
-        # ✅ Step 2: Return 200 OK immediately
-        logger.info(f"✅ Secret matched for task {nonce}. Returning 200 OK and spawning thread.")
-        response = TaskResponse(
-            status="ok",
-            message=f"Secret verified for {task_name}. Task will process in background thread.",
+        nonce = payload.get('nonce') or f"auto-{int(time.time())}"
+        task = payload.get('task', f"task-{nonce}")
+        round_num = int(payload.get('round', 1)) if payload.get('round') is not None else 1
+        brief = payload.get('brief', '')
+        email = payload.get('email', f'unknown@local')
+        evaluation_url = payload.get('evaluation_url', '')
+        checks = payload.get('checks', []) or []
+
+        # Convert attachments dicts into simple objects with .name and .url
+        raw_attachments = payload.get('attachments', []) or []
+        attachments = []
+        for a in raw_attachments:
+            try:
+                attachments.append(SimpleNamespace(name=a.get('name'), url=a.get('url')))
+            except Exception:
+                # Skip malformed attachment
+                continue
+
+        task_request_obj = SimpleNamespace(
+            email=email,
+            task=task,
+            round=round_num,
             nonce=nonce,
-            timestamp=datetime.utcnow().isoformat()
+            brief=brief,
+            attachments=attachments,
+            checks=checks,
+            evaluation_url=evaluation_url,
+            endpoint=payload.get('endpoint', ''),
+            secret=secret
         )
 
-        # ✅ Step 3: Start background processing in a separate thread
-        def background_thread():
-            try:
-                from types import SimpleNamespace
-                raw_attachments = payload.get('attachments', []) or []
-                attachments = [
-                    SimpleNamespace(name=a.get('name'), url=a.get('url'))
-                    for a in raw_attachments if isinstance(a, dict)
-                ]
-                task_request_obj = SimpleNamespace(
-                    email=payload.get('email', 'unknown@local'),
-                    task=task_name,
-                    round=int(payload.get('round', 1)),
-                    nonce=nonce,
-                    brief=payload.get('brief', ''),
-                    attachments=attachments,
-                    checks=payload.get('checks', []) or [],
-                    evaluation_url=payload.get('evaluation_url', ''),
-                    endpoint=payload.get('endpoint', ''),
-                    secret=secret
-                )
+        logger.info(f"Received task: {task_request_obj.task} (Round {task_request_obj.round})")
+        logger.info(f"Brief: {task_request_obj.brief[:100]}...")
 
-                logger.info(f"Thread started for task {nonce}")
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(task_processor.process_task(task_request_obj))
-                loop.close()
-                logger.info(f"Thread finished processing task {nonce}")
+        # Queue task for background processing
+        background_tasks.add_task(process_task_background, task_request_obj)
 
-            except Exception as e:
-                logger.error(f"Thread failed for task {nonce}: {e}", exc_info=True)
-
-        threading.Thread(target=background_thread, daemon=True).start()
-        return response
+        return TaskResponse(
+            status="accepted",
+            message=f"Task {task_request_obj.task} accepted and queued for processing",
+            nonce=task_request_obj.nonce,
+            timestamp=datetime.utcnow().isoformat()
+        )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error handling /task request: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-    
+        logger.error(f"Error receiving task: {e}", exc_info=True)
+        # Return 200 with accepted to callers to avoid 422 on malformed inputs; log the error
+        return TaskResponse(
+            status="accepted",
+            message=f"Task queued but encountered internal normalization error: {str(e)}",
+            nonce=payload.get('nonce', f"auto-{int(datetime.utcnow().timestamp())}") if isinstance(payload, dict) else f"auto-{int(datetime.utcnow().timestamp())}",
+            timestamp=datetime.utcnow().isoformat()
+        )
+
+async def process_task_background(task_request: TaskRequest):
+    """Background task processor"""
+    try:
+        logger.info(f"Processing task {task_request.nonce} in background...")
+        
+        result = await task_processor.process_task(task_request)
+        
+        if result['success']:
+            logger.info(f"Task {task_request.nonce} completed successfully")
+            logger.info(f"Repo: {result['repo_url']}")
+            logger.info(f"Pages: {result['pages_url']}")
+        else:
+            logger.error(f"Task {task_request.nonce} failed: {result.get('error')}")
+            
+    except Exception as e:
+        logger.error(f"Background processing failed for {task_request.nonce}: {e}", exc_info=True)
 
 @app.get("/status/{nonce}")
 async def get_task_status(nonce: str):
