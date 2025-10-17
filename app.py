@@ -159,7 +159,7 @@ async def receive_task(request: Request, background_tasks: BackgroundTasks):
 
         # Queue task for background processing
         #background_tasks.add_task(process_task_background, task_request_obj)
-        thread = threading.Thread(target = process_task_background, args = (task_request_obj,), deamon = True) 
+        thread = threading.Thread(target = process_task_background, args = (task_request_obj,), daemon = True) 
         thread.start()
 
         return TaskResponse(
