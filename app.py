@@ -1,7 +1,6 @@
 """
 Main FastAPI application for TDS LLM Code Deployment Project
-Receives task requests, generates solutions, and submits to GitHub
-OPTIMIZED: Returns 200 OK immediately after secret validation
+ULTRA-FAST: Returns 200 OK in <1 second after secret validation
 """
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +11,7 @@ import uvicorn
 import logging
 from datetime import datetime
 import time
+import asyncio
 
 from task_processor import TaskProcessor
 from config import settings
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="TDS LLM Code Deployment API",
     description="API endpoint for receiving and processing coding tasks",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # Enable CORS
@@ -67,11 +67,11 @@ class TaskResponse(BaseModel):
 async def startup_event():
     """Initialize task processor on startup"""
     global task_processor
-    logger.info("Starting up TDS LLM API...")
+    logger.info("🚀 Starting up TDS LLM API...")
     
     try:
         task_processor = TaskProcessor()
-        logger.info("Task processor initialized successfully")
+        logger.info("✅ Task processor initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize task processor: {e}")
         raise
@@ -82,7 +82,7 @@ async def root():
     return {
         "service": "TDS LLM Code Deployment API",
         "status": "running",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "endpoints": {
             "health": "/health",
             "receive_task": "POST /task",
@@ -104,82 +104,96 @@ async def health():
 @app.post("/task")
 async def receive_task(request: Request, background_tasks: BackgroundTasks):
     """
-    Receive a coding task from instructors
-    OPTIMIZED: Returns 200 OK immediately after secret validation
+    Receive a coding task - ULTRA FAST response
+    Returns 200 OK within 0.5-1 second after secret validation
     """
+    request_start = time.time()
+    
     try:
-        # Parse JSON payload
+        # STEP 1: Get raw body bytes (fastest possible read)
+        raw_body = await request.body()
+        
+        # STEP 2: Quick JSON parse (minimal processing)
+        import json
         try:
-            payload = await request.json()
-        except Exception as e:
-            logger.warning(f"Failed to parse JSON body: {e}")
-            # Return 200 with error message but still accept
+            payload = json.loads(raw_body)
+        except:
+            # Invalid JSON - return 200 anyway
+            logger.warning("⚠️ Invalid JSON received")
             return JSONResponse(
                 status_code=200,
                 content={
                     "status": "accepted",
-                    "message": "Task accepted but payload parsing failed",
+                    "message": "Request accepted (invalid JSON)",
                     "nonce": f"auto-{int(time.time())}",
                     "timestamp": datetime.utcnow().isoformat()
                 }
             )
         
-        # IMMEDIATE SECRET VALIDATION - Return 401 if invalid
+        # STEP 3: IMMEDIATE SECRET CHECK (only thing that blocks 200)
         secret = payload.get('secret')
         if secret != settings.SECRET:
+            # Invalid secret = 401 (security requirement)
             nonce = payload.get('nonce', 'unknown')
-            logger.warning(f"Invalid secret received for task {nonce}")
+            logger.warning(f"🔒 Invalid secret for nonce: {nonce}")
             raise HTTPException(status_code=401, detail="Invalid secret")
         
-        # SECRET IS VALID - Generate immediate response
+        # STEP 4: Extract minimal info for immediate response
         nonce = payload.get('nonce') or f"auto-{int(time.time())}"
         task = payload.get('task', f"task-{nonce}")
+        round_num = payload.get('round', 1)
         
-        # Create immediate 200 OK response
-        response_data = {
+        # STEP 5: Prepare 200 OK response IMMEDIATELY
+        response_time = (time.time() - request_start) * 1000  # milliseconds
+        logger.info(f"⚡ [{nonce}] Returning 200 OK after {response_time:.0f}ms")
+        
+        response_content = {
             "status": "accepted",
             "message": f"Task {task} accepted and queued for processing",
             "nonce": nonce,
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        # Queue background processing AFTER preparing response
-        background_tasks.add_task(
-            process_task_background_safe,
-            payload
+        # STEP 6: Queue background processing (happens AFTER response sent)
+        # Fire-and-forget - don't wait for this
+        asyncio.create_task(
+            process_task_async(payload, nonce)
         )
         
-        logger.info(f"✅ Accepted task: {task} (Round {payload.get('round', 1)})")
-        
-        # Return 200 OK immediately
-        return JSONResponse(status_code=200, content=response_data)
+        # STEP 7: Return 200 OK (client gets response NOW)
+        return JSONResponse(
+            status_code=200,
+            content=response_content
+        )
         
     except HTTPException:
-        # Re-raise HTTP exceptions (like 401)
+        # Re-raise 401 for invalid secret
         raise
     except Exception as e:
-        # Log error but still return 200 OK
-        logger.error(f"Error in receive_task: {e}", exc_info=True)
+        # Any other error - still return 200 OK
+        logger.error(f"❌ Error in receive_task: {e}", exc_info=True)
         return JSONResponse(
             status_code=200,
             content={
                 "status": "accepted",
-                "message": f"Task accepted with errors: {str(e)}",
+                "message": f"Task accepted with error: {str(e)[:100]}",
                 "nonce": f"error-{int(time.time())}",
                 "timestamp": datetime.utcnow().isoformat()
             }
         )
 
-async def process_task_background_safe(payload: dict):
+async def process_task_async(payload: dict, nonce: str):
     """
-    Background task processor with safe payload normalization
-    This runs AFTER the 200 OK response is sent
+    Async background processor - runs AFTER 200 response sent
+    This is fire-and-forget - client doesn't wait for this
     """
     try:
-        # Normalize payload into task request object
+        logger.info(f"[{nonce}] 🔄 Starting background processing...")
+        
+        # Import here to avoid slowing down the main endpoint
         from types import SimpleNamespace
         
-        nonce = payload.get('nonce') or f"auto-{int(time.time())}"
+        # Extract all data from payload
         task = payload.get('task', f"task-{nonce}")
         round_num = int(payload.get('round', 1)) if payload.get('round') is not None else 1
         brief = payload.get('brief', '')
@@ -189,19 +203,18 @@ async def process_task_background_safe(payload: dict):
         secret = payload.get('secret', '')
         checks = payload.get('checks', []) or []
         
-        # Convert attachments
+        # Process attachments
         raw_attachments = payload.get('attachments', []) or []
         attachments = []
-        for a in raw_attachments:
+        for att in raw_attachments:
             try:
-                if isinstance(a, dict):
+                if isinstance(att, dict):
                     attachments.append(SimpleNamespace(
-                        name=a.get('name', 'unnamed'),
-                        url=a.get('url', '')
+                        name=att.get('name', 'unnamed'),
+                        url=att.get('url', '')
                     ))
             except Exception as e:
-                logger.warning(f"Skipping malformed attachment: {e}")
-                continue
+                logger.warning(f"[{nonce}] Skipping malformed attachment: {e}")
         
         # Create task request object
         task_request = SimpleNamespace(
@@ -217,22 +230,22 @@ async def process_task_background_safe(payload: dict):
             secret=secret
         )
         
-        logger.info(f"[{nonce}] Processing task in background: {task} (Round {round_num})")
-        logger.info(f"[{nonce}] Brief: {brief[:100]}...")
+        logger.info(f"[{nonce}] 📋 Task: {task} (Round {round_num})")
+        logger.info(f"[{nonce}] 📝 Brief: {brief[:80]}...")
         
-        # Process the task
+        # Process the task (this takes 5-8 minutes)
         result = await task_processor.process_task(task_request)
         
-        if result['success']:
-            logger.info(f"[{nonce}] ✅ Task completed successfully")
-            logger.info(f"[{nonce}] Repo: {result['repo_url']}")
-            logger.info(f"[{nonce}] Pages: {result['pages_url']}")
+        # Log result
+        if result.get('success'):
+            logger.info(f"[{nonce}] ✅ Task completed successfully!")
+            logger.info(f"[{nonce}] 🔗 Repo: {result.get('repo_url')}")
+            logger.info(f"[{nonce}] 🌐 Pages: {result.get('pages_url')}")
         else:
             logger.error(f"[{nonce}] ❌ Task failed: {result.get('error')}")
             
     except Exception as e:
-        nonce = payload.get('nonce', 'unknown') if isinstance(payload, dict) else 'unknown'
-        logger.error(f"[{nonce}] ❌ Background processing failed: {e}", exc_info=True)
+        logger.error(f"[{nonce}] 💥 Background processing crashed: {e}", exc_info=True)
 
 @app.get("/status/{nonce}")
 async def get_task_status(nonce: str):
