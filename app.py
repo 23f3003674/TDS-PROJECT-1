@@ -153,8 +153,12 @@ async def receive_task(request: Request):
 
                 logger.info(f"Thread started for task {nonce}")
                 import asyncio
-                asyncio.run(task_processor.process_task(task_request_obj))
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(task_processor.process_task(task_request_obj))
+                loop.close()
                 logger.info(f"Thread finished processing task {nonce}")
+
             except Exception as e:
                 logger.error(f"Thread failed for task {nonce}: {e}", exc_info=True)
 
