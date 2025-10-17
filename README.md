@@ -1,3 +1,14 @@
+---
+title: TDS LLM Code Deployment System
+emoji: "🚀"
+colorFrom: blue
+colorTo: green
+sdk: docker
+sdk_version: "1.0"
+app_file: app.py
+pinned: false
+---
+
 # 🚀 TDS LLM Code Deployment System
 
 An automated system that receives coding tasks, generates solutions using LLM, and deploys them to GitHub Pages - all within 8 minutes!
