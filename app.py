@@ -1,14 +1,17 @@
 """
 Main FastAPI application for TDS LLM Code Deployment Project
 Receives task requests, generates solutions, and submits to GitHub
+OPTIMIZED: Returns 200 OK immediately after secret validation
 """
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import uvicorn
 import logging
 from datetime import datetime
+import time
 
 from task_processor import TaskProcessor
 from config import settings
@@ -98,49 +101,110 @@ async def health():
         "aimlapi_configured": bool(settings.AIMLAPI_KEY)
     }
 
-@app.post("/task", response_model=TaskResponse)
+@app.post("/task")
 async def receive_task(request: Request, background_tasks: BackgroundTasks):
     """
     Receive a coding task from instructors
+    OPTIMIZED: Returns 200 OK immediately after secret validation
     """
     try:
-        payload = {}
+        # Parse JSON payload
         try:
             payload = await request.json()
-        except Exception:
-            # If the body isn't valid JSON, keep payload empty and continue so we always return 200/accepted
-            logger.warning("Received non-JSON or invalid JSON body for /task")
-
-        # Validate secret early (return 401 if invalid)
-        secret = payload.get('secret') if isinstance(payload, dict) else None
+        except Exception as e:
+            logger.warning(f"Failed to parse JSON body: {e}")
+            # Return 200 with error message but still accept
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "accepted",
+                    "message": "Task accepted but payload parsing failed",
+                    "nonce": f"auto-{int(time.time())}",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+        
+        # IMMEDIATE SECRET VALIDATION - Return 401 if invalid
+        secret = payload.get('secret')
         if secret != settings.SECRET:
-            nonce = payload.get('nonce', 'unknown') if isinstance(payload, dict) else 'unknown'
+            nonce = payload.get('nonce', 'unknown')
             logger.warning(f"Invalid secret received for task {nonce}")
             raise HTTPException(status_code=401, detail="Invalid secret")
         
-        # Normalize payload into an object expected by TaskProcessor
-        from types import SimpleNamespace
-        import time
+        # SECRET IS VALID - Generate immediate response
+        nonce = payload.get('nonce') or f"auto-{int(time.time())}"
+        task = payload.get('task', f"task-{nonce}")
+        
+        # Create immediate 200 OK response
+        response_data = {
+            "status": "accepted",
+            "message": f"Task {task} accepted and queued for processing",
+            "nonce": nonce,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Queue background processing AFTER preparing response
+        background_tasks.add_task(
+            process_task_background_safe,
+            payload
+        )
+        
+        logger.info(f"✅ Accepted task: {task} (Round {payload.get('round', 1)})")
+        
+        # Return 200 OK immediately
+        return JSONResponse(status_code=200, content=response_data)
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 401)
+        raise
+    except Exception as e:
+        # Log error but still return 200 OK
+        logger.error(f"Error in receive_task: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "accepted",
+                "message": f"Task accepted with errors: {str(e)}",
+                "nonce": f"error-{int(time.time())}",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
 
+async def process_task_background_safe(payload: dict):
+    """
+    Background task processor with safe payload normalization
+    This runs AFTER the 200 OK response is sent
+    """
+    try:
+        # Normalize payload into task request object
+        from types import SimpleNamespace
+        
         nonce = payload.get('nonce') or f"auto-{int(time.time())}"
         task = payload.get('task', f"task-{nonce}")
         round_num = int(payload.get('round', 1)) if payload.get('round') is not None else 1
         brief = payload.get('brief', '')
-        email = payload.get('email', f'unknown@local')
+        email = payload.get('email', 'unknown@local')
         evaluation_url = payload.get('evaluation_url', '')
+        endpoint = payload.get('endpoint', '')
+        secret = payload.get('secret', '')
         checks = payload.get('checks', []) or []
-
-        # Convert attachments dicts into simple objects with .name and .url
+        
+        # Convert attachments
         raw_attachments = payload.get('attachments', []) or []
         attachments = []
         for a in raw_attachments:
             try:
-                attachments.append(SimpleNamespace(name=a.get('name'), url=a.get('url')))
-            except Exception:
-                # Skip malformed attachment
+                if isinstance(a, dict):
+                    attachments.append(SimpleNamespace(
+                        name=a.get('name', 'unnamed'),
+                        url=a.get('url', '')
+                    ))
+            except Exception as e:
+                logger.warning(f"Skipping malformed attachment: {e}")
                 continue
-
-        task_request_obj = SimpleNamespace(
+        
+        # Create task request object
+        task_request = SimpleNamespace(
             email=email,
             task=task,
             round=round_num,
@@ -149,51 +213,26 @@ async def receive_task(request: Request, background_tasks: BackgroundTasks):
             attachments=attachments,
             checks=checks,
             evaluation_url=evaluation_url,
-            endpoint=payload.get('endpoint', ''),
+            endpoint=endpoint,
             secret=secret
         )
-
-        logger.info(f"Received task: {task_request_obj.task} (Round {task_request_obj.round})")
-        logger.info(f"Brief: {task_request_obj.brief[:100]}...")
-
-        # Queue task for background processing
-        background_tasks.add_task(process_task_background, task_request_obj)
-
-        return TaskResponse(
-            status="accepted",
-            message=f"Task {task_request_obj.task} accepted and queued for processing",
-            nonce=task_request_obj.nonce,
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error receiving task: {e}", exc_info=True)
-        # Return 200 with accepted to callers to avoid 422 on malformed inputs; log the error
-        return TaskResponse(
-            status="accepted",
-            message=f"Task queued but encountered internal normalization error: {str(e)}",
-            nonce=payload.get('nonce', f"auto-{int(datetime.utcnow().timestamp())}") if isinstance(payload, dict) else f"auto-{int(datetime.utcnow().timestamp())}",
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-async def process_task_background(task_request: TaskRequest):
-    """Background task processor"""
-    try:
-        logger.info(f"Processing task {task_request.nonce} in background...")
         
+        logger.info(f"[{nonce}] Processing task in background: {task} (Round {round_num})")
+        logger.info(f"[{nonce}] Brief: {brief[:100]}...")
+        
+        # Process the task
         result = await task_processor.process_task(task_request)
         
         if result['success']:
-            logger.info(f"Task {task_request.nonce} completed successfully")
-            logger.info(f"Repo: {result['repo_url']}")
-            logger.info(f"Pages: {result['pages_url']}")
+            logger.info(f"[{nonce}] ✅ Task completed successfully")
+            logger.info(f"[{nonce}] Repo: {result['repo_url']}")
+            logger.info(f"[{nonce}] Pages: {result['pages_url']}")
         else:
-            logger.error(f"Task {task_request.nonce} failed: {result.get('error')}")
+            logger.error(f"[{nonce}] ❌ Task failed: {result.get('error')}")
             
     except Exception as e:
-        logger.error(f"Background processing failed for {task_request.nonce}: {e}", exc_info=True)
+        nonce = payload.get('nonce', 'unknown') if isinstance(payload, dict) else 'unknown'
+        logger.error(f"[{nonce}] ❌ Background processing failed: {e}", exc_info=True)
 
 @app.get("/status/{nonce}")
 async def get_task_status(nonce: str):
