@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 import uvicorn
 import logging
 from datetime import datetime
+import threading
 
 from task_processor import TaskProcessor
 from config import settings
@@ -117,7 +118,7 @@ async def receive_task(request: Request, background_tasks: BackgroundTasks):
             nonce = payload.get('nonce', 'unknown') if isinstance(payload, dict) else 'unknown'
             logger.warning(f"Invalid secret received for task {nonce}")
             raise HTTPException(status_code=401, detail="Invalid secret")
-
+        
         # Normalize payload into an object expected by TaskProcessor
         from types import SimpleNamespace
         import time
@@ -157,7 +158,9 @@ async def receive_task(request: Request, background_tasks: BackgroundTasks):
         logger.info(f"Brief: {task_request_obj.brief[:100]}...")
 
         # Queue task for background processing
-        background_tasks.add_task(process_task_background, task_request_obj)
+        #background_tasks.add_task(process_task_background, task_request_obj)
+        thread = threading.Thread(target = process_task_background, args = (task_request_obj,), deamon = True) 
+        thread.start()
 
         return TaskResponse(
             status="accepted",
